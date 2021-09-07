@@ -1,0 +1,134 @@
+<body>
+    <div id="myDiv" style="width:100%;"></div>
+</body>
+    
+<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+<script>
+    // getValues ---------------------------------------------------------------
+
+    // Given the results of a SPARQL query, simplify into an unested dictionary 
+    // of datapoints
+
+    // {
+    //   date: { type: 'literal', value: '1997' },
+    //   gastype: { type: 'literal', value: 'Hydrofluorocarbons - HFC' }
+    // } 
+    //
+    // -> {date: '1997', gastype: 'Hydrofluorocarbons - HFC'}
+
+    // TODO: take datatypes into consideration to cast numbers to numeric etc.
+
+    function getValues(list) {
+        return list.map(item => {
+            return Object.fromEntries(
+                Object.entries(item).map(
+                    ([key, value]) => [key, value.value]
+                )
+            )
+        });
+    };
+
+    // longify -----------------------------------------------------------------
+
+    // turn array of dicts into a dict of arrays
+    // [{'a': 1, 'b': 2}, {'a': 3, 'b': 4}] -> {'a': [1, 3], 'b': [2, 4]}
+
+    // TODO: deal with missing values, use the header from the sparql response 
+    // to define the keys.
+
+    // https://stackoverflow.com/questions/7455030/how-to-collate-an-array-of-dictionaries-into-a-dictionary-of-arrays
+
+    function longify(list) {
+        var map = {};
+        for (var i = 0; i < list.length; ++i) {
+            entries = Object.entries(list[i]);
+            entries.forEach(([key, value]) => {
+                if (!map[key])
+                    map[key] = [];
+                map[key].push(value);
+            });
+        };
+        return map;
+    };
+
+    // makeChartConfig ---------------------------------------------------------
+
+    // Given a SPARQL query, this function allows a user to provide the
+    // variables which should be plotted on the x-axis and the variable which
+    // should be plotted on the y-axis, along with a grouping variable which
+    // will be used plot multiple lines on the same chart.
+
+    // The function returns a Plotly configuration object which can be passed to
+    // Plotly.newPlot().
+
+    async function makeChartConfig(endpoint, query, x, y, by, mode, type) {
+
+        var response = await fetch(endpoint, {
+            method: 'POST',
+            mode: 'cors',
+            headers: {
+                'Content-Type': 'application/sparql-query',
+                'Accept': 'application/sparql-results+json'
+            },
+            body: query
+        });
+
+        let response_json = await response.json();
+        let bindings = response_json.results.bindings;
+        let data = longify(getValues(bindings));
+
+        let groups = [...new Set(data[by])];
+        let plotly_data = [];
+
+        for (let group of groups) {
+            var x_vals = data[x].filter((r, i) => data[by].map(g => g == group)[i]);
+            var y_vals = data[y].filter((r, i) => data[by].map(g => g == group)[i]);
+            plotly_data.push({
+                "x": x_vals,
+                "y": y_vals,
+                "name": group,
+                "mode": mode,
+                "type": type
+            });
+        };
+
+        return(plotly_data);
+    }
+
+    // -------------------------------------------------------------------------
+
+    const endpoint = "https://staging.gss-data.org.uk/sparql";
+
+    const query = `
+    PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> 
+    PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> 
+                                
+    SELECT ?gastype ?date (SUM(?emission) AS ?totalemis) ?measuretype
+    WHERE {
+        GRAPH <http://gss-data.org.uk/graph/gss_data/energy/beis-final-uk-greenhouse-gas-emissions-national-statistics-1990-to-2019> {
+            ?obs <http://gss-data.org.uk/data/gss_data/energy/beis-final-uk-greenhouse-gas-emissions-national-statistics-1990-to-2019#dimension/gas> ?allgases ;
+            <http://gss-data.org.uk/data/gss_data/energy/beis-final-uk-greenhouse-gas-emissions-national-statistics-1990-to-2019#dimension/breakdown> ?redux ;
+            <http://purl.org/linked-data/sdmx/2009/attribute#unitMeasure> ?measure ;
+            <http://gss-data.org.uk/data/gss_data/energy/beis-final-uk-greenhouse-gas-emissions-national-statistics-1990-to-2019#dimension/period> ?year_uri ;
+            <http://gss-data.org.uk/def/measure/gas-emissions> ?emission .
+
+            BIND(SUBSTR(str(?year_uri),38,4) AS ?date) .
+            FILTER(xsd:decimal(?date) >= 1990) .
+        }
+        ?allgases rdfs:label ?gastype.
+        ?measure rdfs:label ?measuretype.
+    } 
+    GROUP BY ?gastype ?date ?measuretype
+    ORDER BY ?gastype ?date
+    `;
+
+    var plotly_data = makeChartConfig(
+        endpoint,
+        query, 
+        x = "date", y = "totalemis", by = "gastype", 
+        mode = 'lines+markers', 
+        type = 'scatter');
+
+    plotly_data.then(data => Plotly.newPlot('myDiv', data));
+
+</script>
